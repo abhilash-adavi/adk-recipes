@@ -22,7 +22,7 @@ dependencies:
     - "Vertex AI"
 
 ownership:
-  team: "cyber-guardian"
+  team: "GSD"
   poc: "aanas"
   contributors:
     - "abhilash-adavi"

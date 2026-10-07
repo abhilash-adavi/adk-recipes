@@ -70,11 +70,11 @@ cp .env.example .env
 
 Configure your project settings in `.env`:
 ```env
-GOOGLE_GENAI_USE_VERTEXAI=1
-GOOGLE_CLOUD_PROJECT="your-gcp-project-id"
-GOOGLE_CLOUD_LOCATION="your-gcp-region"
-BQ_DATASET="cyber_guardian_dataset"
-MODEL_NAME="gemini-3.5-flash"
+GOOGLE_GENAI_USE_VERTEXAI=TRUE
+GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+GOOGLE_CLOUD_LOCATION=global
+BQ_DATASET=cyber_guardian_dataset
+MODEL_NAME=gemini-3.7-flash
 ```
 
 > [!IMPORTANT]

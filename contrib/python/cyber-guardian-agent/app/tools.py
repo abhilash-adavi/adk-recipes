@@ -1,6 +1,21 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -12,6 +27,9 @@ from google.cloud import bigquery
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+_DATASET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 # --- Helper Function to convert BigQuery rows to JSON ---
@@ -43,15 +61,21 @@ _bq_initialized = False
 
 def _get_bq_client() -> tuple[bigquery.Client, str, str]:
     """Returns (bigquery.Client, project_id, dataset) using env or ADC."""
-    raw_project = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    raw_project = os.getenv("GOOGLE_CLOUD_PROJECT")
     project_id = (
         None if not raw_project or raw_project.startswith("<") else raw_project
     )
-    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
-    if not dataset or dataset.startswith("<"):
-        dataset = "cyber_guardian_dataset"
+    dataset = os.getenv("BQ_DATASET")
+    if not dataset or not _DATASET_ID_PATTERN.fullmatch(dataset):
+        raise ValueError(
+            f"Invalid or missing BQ_DATASET identifier: {dataset!r}"
+        )
     client = bigquery.Client(project=project_id)
     resolved_project = project_id or client.project
+    if resolved_project and not _PROJECT_ID_PATTERN.fullmatch(resolved_project):
+        raise ValueError(
+            f"Invalid GOOGLE_CLOUD_PROJECT identifier: {resolved_project!r}"
+        )
     return client, resolved_project, dataset
 
 
@@ -109,13 +133,14 @@ def triageQueryTool(hostname: str, alert_type: str) -> str:
     asset_rows = list(
         client.query(context_query, job_config=job_config).result()
     )
+    asset_context = (
+        dict(asset_rows[0]) if asset_rows else "No asset context found."
+    )
 
     return json.dumps(
         {
             "is_duplicate": False,
-            "asset_context": dict(asset_rows[0])
-            if asset_rows
-            else "No asset context found.",
+            "asset_context": asset_context,
         }
     )
 
