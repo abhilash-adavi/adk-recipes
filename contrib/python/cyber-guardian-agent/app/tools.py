@@ -38,6 +38,31 @@ def bq_rows_to_json(rows: list[Any]) -> str:
     return json.dumps(list_of_dicts, default=datetime_converter)
 
 
+_bq_initialized = False
+
+
+def _get_bq_client() -> tuple[bigquery.Client, str, str]:
+    """Returns (bigquery.Client, project_id, dataset) using env or ADC."""
+    raw_project = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    project_id = (
+        None if not raw_project or raw_project.startswith("<") else raw_project
+    )
+    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
+    if not dataset or dataset.startswith("<"):
+        dataset = "cyber_guardian_dataset"
+    client = bigquery.Client(project=project_id)
+    resolved_project = project_id or client.project
+    return client, resolved_project, dataset
+
+
+def _ensure_bq_tables() -> None:
+    """Lazily initializes BigQuery tables on first tool execution."""
+    global _bq_initialized
+    if not _bq_initialized:
+        _bq_initialized = True
+        init_bq_tables()
+
+
 # --- Triage Tool ---
 def triageQueryTool(hostname: str, alert_type: str) -> str:
     """
@@ -45,16 +70,15 @@ def triageQueryTool(hostname: str, alert_type: str) -> str:
     - Arg hostname: The hostname from the alert (e.g., 'kvm010019506d1b').
     - Arg alert_type: The type of the alert (e.g., 'IOC_MATCH').
     """
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
-    client = bigquery.Client(project=project_id)
+    _ensure_bq_tables()
+    client, project_id, dataset = _get_bq_client()
 
     # 1. Deduplication Check (Now uses AlertType instead of PrimaryIOC)
     dedup_query = f"""
         SELECT IncidentID, CreationTimestamp FROM `{project_id}.{dataset}.incident_management`
         WHERE PrimaryHost = @hostname AND AlertType = @alert_type
         AND CreationTimestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-    """
+    """  # noqa: S608
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("hostname", "STRING", hostname),
@@ -63,19 +87,28 @@ def triageQueryTool(hostname: str, alert_type: str) -> str:
             ),  # Updated parameter
         ]
     )
-    duplicate_rows = list(client.query(dedup_query, job_config=job_config).result())
+    duplicate_rows = list(
+        client.query(dedup_query, job_config=job_config).result()
+    )
 
     if duplicate_rows:
         return json.dumps(
-            {"is_duplicate": True, "existing_incident": duplicate_rows[0]["IncidentID"]}
+            {
+                "is_duplicate": True,
+                "existing_incident": duplicate_rows[0]["IncidentID"],
+            }
         )
 
     # 2. Context Enrichment (This part remains the same)
-    context_query = f"SELECT Owner, BusinessCriticality FROM `{project_id}.{dataset}.asset_inventory` WHERE Hostname = @hostname"
+    context_query = f"SELECT Owner, BusinessCriticality FROM `{project_id}.{dataset}.asset_inventory` WHERE Hostname = @hostname"  # noqa: S608
     job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("hostname", "STRING", hostname)]
+        query_parameters=[
+            bigquery.ScalarQueryParameter("hostname", "STRING", hostname)
+        ]
     )
-    asset_rows = list(client.query(context_query, job_config=job_config).result())
+    asset_rows = list(
+        client.query(context_query, job_config=job_config).result()
+    )
 
     return json.dumps(
         {
@@ -101,16 +134,15 @@ def investigationQueryTool(
     - Arg parent_process: (Optional) The parent process for EDR alerts.
     - Arg destination_ip: (Optional) The malicious IP for IOC_MATCH alerts.
     """
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
-    client = bigquery.Client(project=project_id)
+    _ensure_bq_tables()
+    client, project_id, dataset = _get_bq_client()
 
     if alert_type == "EDR_DETECTION" and parent_process:
         query = f"""
             SELECT EventTimestamp, ProcessName, CommandLine FROM `{project_id}.{dataset}.endpoint_process_events`
             WHERE Hostname = @hostname AND ParentProcessName = @parent_process
             ORDER BY EventTimestamp DESC LIMIT 10
-        """
+        """  # noqa: S608
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("hostname", "STRING", hostname),
@@ -127,7 +159,7 @@ def investigationQueryTool(
             SELECT log_timestamp, source_ip, destination_ip, destination_port FROM `{project_id}.{dataset}.network_connection_log`
             WHERE source_host = @hostname AND destination_ip = @destination_ip
             ORDER BY log_timestamp DESC LIMIT 10
-        """
+        """  # noqa: S608
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("hostname", "STRING", hostname),
@@ -145,15 +177,14 @@ def investigationQueryTool(
 # --- Threat Intel Tool ---
 def threatIntelQueryTool(indicators: list[str]) -> str:
     """Enriches indicators of compromise using the threat_intelligence_kb table."""
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
-    client = bigquery.Client(project=project_id)
+    _ensure_bq_tables()
+    client, project_id, dataset = _get_bq_client()
 
     # Assumes indicators is a list of strings, e.g., ["392a...", "d8e8fca..."]
     query = f"""
         SELECT IOC_Value, IsMalicious, ThreatName, Confidence FROM `{project_id}.{dataset}.threat_intelligence_kb`
         WHERE IOC_Value IN UNNEST(@indicators)
-    """
+    """  # noqa: S608
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("indicators", "STRING", indicators)
@@ -162,7 +193,9 @@ def threatIntelQueryTool(indicators: list[str]) -> str:
     rows = list(client.query(query, job_config=job_config).result())
 
     if not rows:
-        return json.dumps({"error": f"No threat intel found for IOCs: {indicators}"})
+        return json.dumps(
+            {"error": f"No threat intel found for IOCs: {indicators}"}
+        )
 
     return bq_rows_to_json(rows)
 
@@ -173,17 +206,18 @@ def getPlaybookTool(triggering_condition: str) -> str:
     Retrieves the appropriate response playbook based on a trigger.
     - Arg triggering_condition: The condition to match, e.g., "ThreatName = 'Cobalt Strike C2'".
     """
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
-    client = bigquery.Client(project=project_id)
+    _ensure_bq_tables()
+    client, project_id, dataset = _get_bq_client()
 
     query = f"""
         SELECT ActionCommand, RequiresApproval FROM `{project_id}.{dataset}.response_playbooks`
         WHERE TriggeringCondition = @trigger
-    """
+    """  # noqa: S608
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("trigger", "STRING", triggering_condition)
+            bigquery.ScalarQueryParameter(
+                "trigger", "STRING", triggering_condition
+            )
         ]
     )
     rows = list(client.query(query, job_config=job_config).result())
@@ -197,7 +231,9 @@ def responseExecutionTool(action: str, target: str) -> str:
     return json.dumps({"status": "success", "action": action, "target": target})
 
 
-def createIncidentTool(alert_type: str, hostname: str, user: str, severity: str) -> str:
+def createIncidentTool(
+    alert_type: str, hostname: str, user: str, severity: str
+) -> str:
     """
     Creates a new incident record in the incident_management table.
     - Arg alert_type: The type of the alert (e.g., 'EDR_DETECTION').
@@ -205,9 +241,8 @@ def createIncidentTool(alert_type: str, hostname: str, user: str, severity: str)
     - Arg user: The primary user involved.
     - Arg severity: The severity of the alert (e.g., 'Critical', 'High').
     """
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    dataset = os.getenv("BQ_DATASET", "cyber_guardian_dataset")
-    client = bigquery.Client(project=project_id)
+    _ensure_bq_tables()
+    client, project_id, dataset = _get_bq_client()
 
     incident_id = f"INC-{str(uuid.uuid4())[:8]}"
     creation_timestamp = datetime.utcnow().isoformat()
@@ -217,7 +252,7 @@ def createIncidentTool(alert_type: str, hostname: str, user: str, severity: str)
         (IncidentID, CreationTimestamp, AlertType, Status, Severity, PrimaryHost, PrimaryUser)
         VALUES
         (@incident_id, @creation_timestamp, @alert_type, 'Triage', @severity, @hostname, @user)
-    """
+    """  # noqa: S608
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -242,40 +277,41 @@ def createIncidentTool(alert_type: str, hostname: str, user: str, severity: str)
         logger.error(f"Failed to create incident: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
+
 def init_bq_tables() -> None:
     """
     Checks if BQ tables are present; if not, creates dataset and tables from CSV files
     using pandas and pandas_gbq, ensuring timestamp columns are parsed correctly.
     """
-    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-    dataset_name = os.environ.get("BQ_DATASET", "cyber_guardian_dataset")
+    try:
+        client, project_id, dataset_name = _get_bq_client()
+        if not project_id:
+            logger.warning(
+                "GOOGLE_CLOUD_PROJECT env var not set. Skipping BQ initialization."
+            )
+            return
+        dataset_id = f"{project_id}.{dataset_name}"
 
-    if not project_id:
-        logger.warning("GOOGLE_CLOUD_PROJECT env var not set. Skipping BQ initialization.")
+        # Create dataset if it doesn't exist
+        dataset = bigquery.Dataset(dataset_id)
+        client.create_dataset(dataset, exists_ok=True)
+        logger.info(f"Dataset {dataset_id} ensured.")
+    except Exception as e:
+        logger.warning(f"Could not connect to BigQuery or ensure dataset: {e}")
         return
-
-    client = bigquery.Client(project=project_id)
-    dataset_id = f"{project_id}.{dataset_name}"
-
-    # Create dataset if it doesn't exist
-    dataset = bigquery.Dataset(dataset_id)
-    client.create_dataset(dataset, exists_ok=True)
-    logger.info(f"Dataset {dataset_id} ensured.")
 
     # Path to CSV files
     current_dir = os.path.dirname(os.path.abspath(__file__))
     csv_dir = os.path.abspath(os.path.join(current_dir, "..", "sample_data"))
 
     if not os.path.exists(csv_dir):
-        logger.warning(f"CSV directory {csv_dir} does not exist. Skipping table creation.")
+        logger.warning(
+            f"CSV directory {csv_dir} does not exist. Skipping table creation."
+        )
         return
 
     # List of columns identified as timestamps across your tables
-    timestamp_columns = [
-        "CreationTimestamp",
-        "EventTimestamp",
-        "log_timestamp"
-    ]
+    timestamp_columns = ["CreationTimestamp", "EventTimestamp", "log_timestamp"]
 
     for filename in os.listdir(csv_dir):
         if filename.endswith(".csv"):
@@ -287,7 +323,9 @@ def init_bq_tables() -> None:
                 client.get_table(table_ref)
                 logger.info(f"Table {table_name} already exists.")
             except NotFound:
-                logger.info(f"Table {table_name} not found. Reading CSV and loading data.")
+                logger.info(
+                    f"Table {table_name} not found. Reading CSV and loading data."
+                )
                 csv_path = os.path.join(csv_dir, filename)
 
                 try:
@@ -298,20 +336,20 @@ def init_bq_tables() -> None:
                     for col in timestamp_columns:
                         if col in df.columns:
                             # 'coerce' turns invalid parsing into NaT (Not a Time) rather than failing the whole script
-                            df[col] = pd.to_datetime(df[col], errors='coerce')
-                            logger.info(f"Converted '{col}' to datetime in table {table_name}.")
+                            df[col] = pd.to_datetime(df[col], errors="coerce")
+                            logger.info(
+                                f"Converted '{col}' to datetime in table {table_name}."
+                            )
 
                     # 3. Upload DataFrame to BigQuery
                     pandas_gbq.to_gbq(
                         df,
                         destination_table=destination_table,
                         project_id=project_id,
-                        if_exists='fail'
+                        if_exists="fail",
                     )
-                    logger.info(f"Successfully loaded data into {table_name} via pandas_gbq.")
+                    logger.info(
+                        f"Successfully loaded data into {table_name} via pandas_gbq."
+                    )
                 except Exception as e:
                     logger.error(f"Failed to load data into {table_name}: {e}")
-
-
-# Run initialization on import
-init_bq_tables()
