@@ -133,9 +133,7 @@ def triageQueryTool(hostname: str, alert_type: str) -> str:
     asset_rows = list(
         client.query(context_query, job_config=job_config).result()
     )
-    asset_context = (
-        dict(asset_rows[0]) if asset_rows else "No asset context found."
-    )
+    asset_context = dict(asset_rows[0]) if asset_rows else {}
 
     return json.dumps(
         {
